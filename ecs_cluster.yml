@@ -1,0 +1,322 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "CF Script to create CI/CD pipeline and fargate resources."
+
+Parameters:
+  ContainerName:
+    Type: String
+    Default: sample-app
+    Description: Name of the container to use with ECS
+  ContainerPort:
+    Type: String
+    Default: 5000
+    Description: Port no to be used with container.
+  VPCId:
+    Type: String
+    Default: vpc-6b5ead00
+    Description: VPCId in which ECS Cluster will be created
+  Subnet1:
+    Type: String
+    Default: "172.31.96.0/20"
+    Description: Subnet1
+  Subnet2:
+    Type: String
+    Default: "172.31.112.0/20"
+    Description: Subnet2
+  KeyName:
+    Type: String
+    Default: devopskey1
+    Description: KeyName to use for ec2
+  ImageId:
+    Type: String
+    Description: ImageId to use for Ec2
+    Default: "ami-0583ca2f3ce809fcb"
+  InstanceType:
+    Type: String
+    Default: "t2.micro"
+  ECSRepoName:
+    Type: String
+    Default: "sample-service"
+  ImageTag:
+    Type: String
+    Default: "latest"
+
+Resources:
+  SubnetOne:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: !Ref Subnet1
+      AvailabilityZone: "us-east-2a"
+      MapPublicIpOnLaunch: true
+      VpcId: !Ref VPCId
+
+  SubnetTwo:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: !Ref Subnet2
+      AvailabilityZone: "us-east-2b"
+      MapPublicIpOnLaunch: true
+      VpcId: !Ref VPCId
+
+  ELBSecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for ELB
+      GroupName: ELBSecGroup
+      SecurityGroupEgress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: -1
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: TCP
+          FromPort: 80
+          ToPort: 80
+      VpcId: !Ref VPCId
+
+  EC2SecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for EC2
+      GroupName: EC2SecGroup
+      SecurityGroupEgress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: -1
+      SecurityGroupIngress:
+        - SourceSecurityGroupId: !Ref ELBSecGroup
+          IpProtocol: TCP
+          FromPort: 5000
+          ToPort: 5000
+      VpcId: !Ref VPCId
+
+  ECSLB:
+    Type: AWS::ElasticLoadBalancing::LoadBalancer
+    Properties:
+      LoadBalancerName: ECSLB
+      Scheme: internet-facing
+      Listeners:
+        - InstancePort: !Ref ContainerPort
+          LoadBalancerPort: "80"
+          Protocol: HTTP
+      Subnets:
+        - !Ref SubnetOne
+        - !Ref SubnetTwo
+      SecurityGroups:
+        - !Ref ELBSecGroup
+      HealthCheck:
+        HealthyThreshold: 5
+        Interval: 20
+        Target: HTTP:5000/healthcheck
+        Timeout: 10
+        UnhealthyThreshold: 2
+
+    ## EC2
+  ECSInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - sts:AssumeRole
+            Principal:
+              Service: ec2.amazonaws.com
+      Policies:
+        - PolicyName: logs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:*
+                Resource:
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*
+        - PolicyName: JoinEcs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              Effect: Allow
+              Action:
+                - "ecs:*"
+                - "ecr:*"
+              Resource: "*"
+
+  ECSInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles:
+        - !Ref ECSInstanceRole
+
+  ECSAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: ECSACS
+      VPCZoneIdentifier:
+        - !Ref SubnetOne
+        - !Ref SubnetTwo
+      DesiredCapacity: 3
+      MaxSize: 6
+      MinSize: 3
+      HealthCheckGracePeriod: 120
+      LaunchConfigurationName: !Ref ECSLaunchConfig
+
+  ECSLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    # Metadata:
+    #   AWS::CloudFormation::Init:
+    #     config:
+    # commands:
+    #   01_add_instance_to_cluster:
+    #     command:
+    #       Fn::Join:
+    #         - ""
+    #         - - "#!/bin/bash"
+    #           - "\n"
+    #           - echo ECS_CLUSTER=
+    #           - !Ref ECSCluster
+    #           - " >> /etc/ecs/ecs.config"
+    # files:
+    # "/etc/cfn/cfn-hup.conf":
+    #   content:
+    #     Fn::Join:
+    #       - ""
+    #       - - "[main]\n"
+    #         - stack=
+    #         - !Ref AWS::StackId
+    #         - "\n"
+    #         - region=
+    #         - !Ref AWS::Region
+    #         - "\n"
+    #   mode: "000400"
+    #   owner: root
+    #   group: root
+    # "/etc/cfn/hooks.d/cfn-auto-reloader.conf":
+    #   content:
+    #     Fn::Join:
+    #       - ""
+    #       - - "[cfn-auto-reloader-hook]\n"
+    #         - "triggers=post.update"
+    #         - "path=Resources.ECSLaunchConfig.Metadata.AWS::CloudFormation::Init"
+    #         - "action=/opt/aws/bin/cfn-init -v "
+    #         - "         --stack "
+    #         - !Ref AWS::StackName
+    #         - "         --resource ECSLaunchConfig "
+    #         - "         --region "
+    #         - !Ref AWS::Region
+    #         - "\n"
+    #         - "runas=root"
+    # services:
+    #   sysvinit:
+    #     cfn-hup:
+    #       enabled: "true"
+    #       ensureRunning: "true"
+    #       files:
+    #         - "/etc/cfn/cfn-hup.conf"
+    #         - "/etc/cfn/hooks.d/cfn-auto-reloader.conf"
+    Properties:
+      IamInstanceProfile: !Ref ECSInstanceProfile
+      KeyName: !Ref KeyName
+      ImageId: !Ref ImageId
+      InstanceType: !Ref InstanceType
+      # LaunchConfigurationName: "ecs-lc"
+      SecurityGroups:
+        - !Ref EC2SecGroup
+      UserData:
+        Fn::Base64:
+          Fn::Join:
+            - ""
+            - - "#!/bin/bash -xe\n"
+              # - "yum install -y aws-cfn-bootstrap"
+              # - "\n"
+              # - "mkdir /etc/ecs"
+              # - "\n"
+              - "echo ECS_CLUSTER="
+              - !Ref ECSCluster
+              - " >> /etc/ecs/ecs.config"
+              # - "\n"
+              # - "/opt/aws/bin/cfn-init -v "
+              # - "         --stack "
+              # - !Ref AWS::StackName
+              # - "         --resource ECSLaunchConfig "
+              # - "         --region "
+              # - !Ref AWS::Region
+              # - "\n"
+              # - "/opt/aws/bin/cfn-signal -e $? "
+              # - "         --stack "
+              # - !Ref AWS::StackName
+              # - "         --resource ECSAutoScalingGroup "
+              # - "         --region "
+              # - !Ref AWS::Region
+              # - "\n"
+
+  ECSRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2008-10-17
+        Statement:
+          - Sid: ""
+            Effect: Allow
+            Principal:
+              Service: ecs.amazonaws.com
+            Action: "sts:AssumeRole"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceRole"
+
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2008-10-17
+        Statement:
+          - Sid: ""
+            Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: "sts:AssumeRole"
+
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: SampleCluster
+
+  ECSService:
+    Type: AWS::ECS::Service
+    DependsOn: ECSAutoScalingGroup
+    Properties:
+      Cluster: !GetAtt ECSCluster.Arn
+      Role: !Ref ECSRole
+      TaskDefinition: !Ref ECSTaskDefinition
+      ServiceName: SampleService
+      DesiredCount: 1
+      LoadBalancers:
+        - ContainerName: !Ref ContainerName
+          ContainerPort: !Ref ContainerPort
+          LoadBalancerName: !Ref ECSLB
+
+  ECSTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      TaskRoleArn: !Ref ECSTaskRole
+      ContainerDefinitions:
+        - Name: !Ref ContainerName
+          Image:
+            Fn::Join:
+              - ""
+              - - Ref: AWS::AccountId
+                - ".dkr.ecr.us-east-2.amazonaws.com/"
+                - Ref: ECSRepoName
+                - ":"
+                - Ref: ImageTag
+          Cpu: 256
+          Memory: 512
+          Essential: true
+          PortMappings:
+            - ContainerPort: !Ref ContainerPort
+              HostPort: 5000
+              Protocol: tcp
+      NetworkMode: bridge

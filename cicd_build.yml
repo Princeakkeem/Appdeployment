@@ -1,0 +1,85 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "CF Script to create CI/CD pipeline."
+
+Resources:
+  ECRRepo:
+    Type: AWS::ECR::Repository
+    Properties: 
+      RepositoryName: sample-service
+      RepositoryPolicyText: {
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "CodeBuildAccess",
+            "Effect": "Allow",
+            "Principal": {
+                "Service": "codebuild.amazonaws.com"
+            },
+            "Action": [
+                "ecr:BatchGetImage",
+                "ecr:GetDownloadUrlForLayer"
+            ]
+        }
+    ]
+}
+
+  CodeBuildSourceCredential:
+    Type: AWS::CodeBuild::SourceCredential
+    Properties:
+      Token: '{{resolve:secretsmanager:githubtoken:SecretString:token}}'
+      ServerType: GITHUB
+      AuthType: PERSONAL_ACCESS_TOKEN
+
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action: ['sts:AssumeRole']
+          Effect: Allow
+          Principal:
+            Service: [codebuild.amazonaws.com]
+        Version: '2012-10-17'
+      Path: /
+      Policies:
+        - PolicyName: CodeBuildAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action:
+                - 'logs:*'
+                - 'ec2:CreateNetworkInterface'
+                - 'ec2:DescribeNetworkInterfaces'
+                - 'ec2:DeleteNetworkInterface'
+                - 'ec2:DescribeSubnets'
+                - 'ec2:DescribeSecurityGroups'
+                - 'ec2:DescribeDhcpOptions'
+                - 'ec2:DescribeVpcs'
+                - 'ec2:CreateNetworkInterfacePermission'
+                - 'ecr:*'
+                - 's3:*'
+                Effect: Allow
+                Resource: '*'
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    DependsOn: CodeBuildSourceCredential
+    Properties:
+      Name: CiCdProject
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Description: CICD Project
+      Artifacts:
+        Type: no_artifacts
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+        PrivilegedMode: true
+      Source:
+        Type: GITHUB
+        Location: https://github.com/Princeakkeem/sample-service.git
+      # Triggers:
+      #   Webhook: true
+      #   FilterGroups:
+      #     - - Pattern: PUSH
+      #         Type: EVENT
+  
